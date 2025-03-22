@@ -1,0 +1,11 @@
+.env*
+*~
+__pycache__/
+env-bookworm/
+
+chapters/
+settings/
+plot/
+characters/
+meta/
+timeline/
