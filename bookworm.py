@@ -8,7 +8,8 @@ sys.modules['sqlite3'] = pysqlite3
 import anthropic
 import openai
 import json
-import client_setup
+import client_setup # custom helper
+import chroma #custom helper
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -26,114 +27,16 @@ claude_conversation = []
 gpt_db_conversation = []
 gpt_writer_conversation = []
 
-# Disable telemetry to avoid the PostHog error in Python 3.8
-chromadb_settings = chromadb.config.Settings(
-    anonymized_telemetry=False
-)
-
-# Initialize the OpenAI embedding function
-openai_ef = embedding_functions.OpenAIEmbeddingFunction(
-    api_key=os.environ["OPENAI_API_KEY"],
-    model_name="text-embedding-3-small"
-)
-
-# Create a persistent client with telemetry disabled
-client = chromadb.EphemeralClient()
-
-
-collections = {}
-key_list = ["meta", "characters", "plot", "timeline", "setting", "chapters"]
-for key in key_list:
-    collections[key] = client.get_or_create_collection(name=key, embedding_function=openai_ef)
+chroma.initialize_db()
 
 # Set up OpenAI LLMs with their system prompt and seed conversation    
-client_setup.initialize_db_llm(gpt_db_conversation, key_list)
+client_setup.initialize_db_llm(gpt_db_conversation, chroma.key_list)
 client_setup.initialize_writer_llm(gpt_writer_conversation)
 
 
-def generate_id(prefix="coll"):
-    # Initialize the counter if it doesn't exist
-    if not hasattr(generate_id, "counter"):
-        generate_id.counter = 0
-    
-    id_val = f"{prefix}_{generate_id.counter}"
-    generate_id.counter += 1
-    return id_val
+# Add all existing documents to respective collections
+chroma.load_all_db_documents()
 
-# Create a collection with the OpenAI embedding function
-meta_collection_name = "meta_documents"
-character_collection_name = "character_documents"
-
-
-# Add some documents to the collection
-meta_documents = [
-    "Book Title: 'Earth is Fucked (and So Am I)'",
-    "Plot Elevator Pitch: An astronaut scientist is on a mission to a foreign planet to do research on the planet and its primitive alien inhabitants. When it comes time to leave, he accidentally gets left behind, with no help coming. To get home, he's going to have to do so with the help of the unwitting civilization of the planet. The planet? Earth. The primitive civilization? Humans, 2035AD.",
-]
-
-character_documents = [
-    "The main character's name is Twain, he is the protagonist and first person narrator. He s cynical and sarcastic, with wit, but not mean spirited.",
-    "The supporting character is Gulla, Twain's research partner and the only member of his species on Earth with him. Gulla is a bit absent-minded, though brilliant in technical areas.",
-]
-
-# Add documents with unique IDs
-collections["meta"].add(
-    documents=meta_documents,
-    ids=["meta1", "meta2"],
-    metadatas=[
-        {"type": "overview"},
-        {"type": "overview"},
-    ]
-)
-
-collections["characters"].add(
-    documents=character_documents,
-    ids=["meta3", "meta4"],
-    metadatas=[
-        {"type": "character"},
-        {"type": "character"},
-    ]
-)
-
-chapters_path = os.getcwd() + "/chapters"
-for filename in os.listdir(chapters_path):
-    with open(os.path.join(chapters_path, filename), 'r') as f:
-        text = f.read()
-        chap_idx = filename.removeprefix("chapter")
-        collections["chapters"].add(
-            documents = [text],
-            ids = [generate_id("chapter")],
-            metadatas = [{
-                "type": "chapter",
-                "chapter_index": chap_idx
-            }]
-        )
-        sample = text[0:50]
-        # print(f"chapter {chap_idx}: {sample}")
-
-
-def add_entry(target, content):
-    if target in collections:
-        collections[target].add(
-            documents = [content],
-            ids = [generate_id(target)],
-            metadatas=[{"type": target}]
-        )
-    print(f"Added document to db: {target}")
-
-
-def lookup_entry(target, content):
-    entry_result = "Not found"
-    
-    if target in collections:
-        query_results = collections[target].query(
-            query_texts=[content],
-            n_results=1
-        )
-        entry_result = query_results["documents"][0]
-        
-    # print(f"Lookup for {target}: {entry_result}")
-    return entry_result
 
 def analyze(user_question, context=None, backend="openai"):
     result = "no result"
@@ -144,7 +47,7 @@ def analyze(user_question, context=None, backend="openai"):
         llm_query += f"No lookup needed, context is {context}"
         should_lookup = "NEVER"
 
-    llm_query =f"Lookup Flag: {should_lookup}.\n Here is my question: {user_question}"
+    llm_query = f"Lookup Flag: {should_lookup}.\n Here is my question: {user_question}"
         
     if backend == "openai":
         # print("using openai writing assistant")
@@ -205,7 +108,7 @@ def query_db(lookup_target):
         query = lookup["query"]
         print(f"Querying {collection}: {query}\n")
         
-        coll_context = lookup_entry(collection, query)
+        coll_context = chroma.lookup_entry(collection, query)
         context += f"{collection}: {coll_context}\n"
         
     print(f"\nCONTEXT: {context}\n")
@@ -236,49 +139,6 @@ def discuss():
         else:
             print("Error: Invalid action type")
 
-        
-        
-
-# def query_db(target, content):
-#     question = input("What do you want to know? ").lower()
-    
-#     context = lookup_entry(target, content)
-#     llm_query = f"Use the following context: {context} for my question: {question}"
-
-#     gpt_conversation.append({"role": "user", "content": llm_query})
-#     completion = gpt_client.chat.completions.create(
-#         model="gpt-4o-mini",
-#         messages=gpt_conversation,
-#         max_completion_tokens=200,
-#         n=1,
-#     )
-#     print(completion.choices[0].message.content)
-
-def list_entries(target):
-    if target not in collections:
-        print(f"{target} not in collections")
-        return
-
-    collection = collections[target]
-    
-    # Get entries with pagination
-    page_size = 100
-    offset = 0
-    
-    while True:
-        page = collection.get(limit=page_size, offset=offset)
-        
-        # If no more results, break the loop
-        if len(page['ids']) == 0:
-            break
-        
-        # Process this page of results
-        print(f"Page {offset // page_size + 1}:")
-        for i, doc_id in enumerate(page['ids']):
-            print(f"ID: {doc_id}, Document: {page['documents'][i]}")
-            
-            # Move to the next page
-            offset += page_size
 
 while True:
     user_input = input("Add, Lookup, Query, List, Discuss? ").lower()
@@ -292,22 +152,20 @@ while True:
 
     target = input("Which collection? ('Show' to show options) ").lower()
     if target.lower() == "show":
-        for key in collections.keys():
+        for key in chroma.key_list:
             print(f"{key}\n")
         target = input("Which collection? ").lower()
                   
     content = input("Entry details: ")
 
     if user_input == "add":
-        add_entry(target, content)
+        chroma.add_db_document(target, content)
     elif user_input == "lookup":
-        lookup_entry(target, content)
+        chroma.lookup_entry(target, content)
     elif user_input == "query":
         query_db(content)
     elif user_input == "list":
-        list_entries(target)
-    elif user_input == "discuss":
-        discuss()
+        chroma.list_entries(target)
     else:
         print("Invalid option")
         continue
