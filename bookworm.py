@@ -10,6 +10,7 @@ import openai
 import json
 import client_setup # custom helper
 import chroma #custom helper
+import formatter #custom helper
 from dotenv import load_dotenv
 load_dotenv()
 
